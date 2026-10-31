@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
+import '../../orders/presentation/driver_orders_screen.dart';
 import '../data/neshan_routing_service.dart';
 import 'widgets/weight_collection_sheet.dart';
 
@@ -45,6 +46,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
   String _remainingDistance = '';
   String _remainingDuration = '';
   String _currentStepInstruction = '';
+  bool _isLoadingGps = true;
   bool _isLoadingRoute = false;
 
   @override
@@ -52,7 +54,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
     super.initState();
     _mapController = MapController();
     _connectWebSocket();
-    _startLocationStreaming();
+    _initGpsAndStartRouting();
   }
 
   void _connectWebSocket() {
@@ -60,29 +62,119 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
     _wsChannel = WebSocketChannel.connect(wsUri);
   }
 
-  /// دریافت مسیر بهینه نشان و رسم خط روی نقشه
-  Future<void> _fetchNeshanRoute(LatLng currentPos, double bearing) async {
+  /// دریافت قطعی موقعیت راننده و تنها پس از آن، شروع مسیریابی
+  Future<void> _initGpsAndStartRouting() async {
+    setState(() => _isLoadingGps = true);
+
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          setState(() => _isLoadingGps = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'موقعیت‌یاب (GPS) گوشی خاموش است. لطفاً آن را روشن کنید.',
+              ),
+              action: SnackBarAction(
+                label: 'تنظیمات',
+                onPressed: () => Geolocator.openLocationSettings(),
+              ),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          if (mounted) {
+            setState(() => _isLoadingGps = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('دسترسی به لوکیشن داده نشد.')),
+            );
+          }
+          return;
+        }
+      }
+
+      // دریافت مختصات دقیق راننده از سخت‌افزار
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 15),
+      );
+
+      final driverLoc = LatLng(pos.latitude, pos.longitude);
+
+      if (mounted) {
+        setState(() {
+          _driverCurrentLocation = driverLoc;
+          _currentBearing = pos.heading;
+          _isLoadingGps = false;
+        });
+
+        // 👈 فقط و فقط حالا که مبدأ داریم، درخواست مسیر به نشان فرستاده می‌شود
+        _requestRouteFromNeshan(driverLoc, pos.heading);
+      }
+
+      // گوش دادن به جابه‌جایی‌های بعدی
+      _startLiveTrackingStream();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingGps = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('عدم موفقیت در اتصال به ماهواره GPS: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// استعلام مسیر ترافیکی نشان
+  Future<void> _requestRouteFromNeshan(LatLng driverPos, double bearing) async {
     if (_isLoadingRoute) return;
-    _isLoadingRoute = true;
+    setState(() => _isLoadingRoute = true);
 
     final result = await NeshanRoutingService.getTrafficRoute(
-      origin: currentPos,
+      origin: driverPos,
       destination: widget.citizenLocation,
       bearing: bearing,
     );
 
-    if (result != null && mounted) {
-      setState(() {
-        _routePoints = result.polylinePoints;
-        _remainingDistance = result.distanceText;
-        _remainingDuration = result.durationText;
-        _currentStepInstruction = result.nextInstruction;
-      });
+    if (mounted) {
+      if (result != null && result.polylinePoints.isNotEmpty) {
+        setState(() {
+          _routePoints = result.polylinePoints;
+          _remainingDistance = result.distanceText;
+          _remainingDuration = result.durationText;
+          _currentStepInstruction = result.nextInstruction;
+        });
+
+        // نمایش همزمان راننده و مقصد روی صفحه
+        try {
+          final bounds = LatLngBounds(driverPos, widget.citizenLocation);
+          _mapController.fitCamera(
+            CameraFit.bounds(
+              bounds: bounds,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 50,
+                vertical: 130,
+              ),
+            ),
+          );
+        } catch (_) {}
+      }
+      setState(() => _isLoadingRoute = false);
     }
-    _isLoadingRoute = false;
   }
 
-  void _startLocationStreaming() {
+  void _startLiveTrackingStream() {
     const locationSettings = LocationSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 6,
@@ -93,17 +185,14 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
           (pos) {
             final latLng = LatLng(pos.latitude, pos.longitude);
 
-            // استعلام اولیه یا به‌روزرسانی مسیر در صورت خالی بودن
-            if (_routePoints.isEmpty) {
-              _fetchNeshanRoute(latLng, pos.heading);
+            if (mounted) {
+              setState(() {
+                _driverCurrentLocation = latLng;
+                _currentBearing = pos.heading;
+              });
             }
 
-            setState(() {
-              _driverCurrentLocation = latLng;
-              _currentBearing = pos.heading;
-            });
-
-            // ارسال زنده موقعیت به وب‌سوکت برای رهگیری توسط شهروند
+            // ارسال زنده به وب‌سوکت برای گوشی شهروند
             if (_wsChannel != null) {
               final payload = {
                 'type': 'driver_location',
@@ -124,7 +213,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
         'driver/requests/${widget.orderId}/update-status/',
         data: {'status': statusKey},
       );
-      setState(() => _missionStatus = statusKey);
+      if (mounted) setState(() => _missionStatus = statusKey);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -144,33 +233,35 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final topPadding = MediaQuery.of(context).padding.top;
-
     return Scaffold(
       appBar: AppBar(
         title: Text('مأموریت سفارش #${widget.orderId}'),
         centerTitle: true,
         actions: [
-          // دکمه بازخوانی دستی مسیر
           IconButton(
-            icon: const Icon(Icons.alt_route_rounded),
-            tooltip: 'مسیریابی مجدد',
-            onPressed: () {
-              if (_driverCurrentLocation != null) {
-                _fetchNeshanRoute(_driverCurrentLocation!, _currentBearing);
-              }
-            },
+            icon: (_isLoadingGps || _isLoadingRoute)
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.green,
+                    ),
+                  )
+                : const Icon(Icons.refresh_rounded),
+            tooltip: 'تلاش مجدد اتصال به GPS و مسیریابی',
+            onPressed: _initGpsAndStartRouting,
           ),
         ],
       ),
       body: Stack(
         children: [
-          // ۱. لایه نقشه و ترسیم خط مسیر نشان
+          // ۱. لایه نقشه
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
               initialCenter: widget.citizenLocation,
-              initialZoom: 15.0,
+              initialZoom: 14.5,
             ),
             children: [
               TileLayer(
@@ -178,7 +269,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                 userAgentPackageName: 'com.ariobonyantoos.waste_driver_app',
               ),
 
-              // رسم خط چندضلعی مسیر ترافیکی نشان
+              // رسم خط فقط در صورتی که مسیر از نشان دریافت شده باشد
               if (_routePoints.isNotEmpty)
                 PolylineLayer(
                   polylines: [
@@ -192,7 +283,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
 
               MarkerLayer(
                 markers: [
-                  // مارکر موقعیت شهروند (مقصد)
+                  // مارکر مقصد (شهروند)
                   Marker(
                     point: widget.citizenLocation,
                     width: 44,
@@ -204,7 +295,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                     ),
                   ),
 
-                  // مارکر موقعیت لحظه‌ای خودروی راننده با زاویه چرخش
+                  // مارکر خودرو (فقط بعد از دریافت لوکیشن راننده)
                   if (_driverCurrentLocation != null)
                     Marker(
                       point: _driverCurrentLocation!,
@@ -224,65 +315,113 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
             ],
           ),
 
-          // ۲. نوار شناور راهنمای مسیر و زمان تخمینی سفر (ETA) در بالای نقشه
-          if (_remainingDuration.isNotEmpty ||
-              _currentStepInstruction.isNotEmpty)
-            Positioned(
-              top: 12,
-              left: 14,
-              right: 14,
-              child: Card(
-                elevation: 6,
-                color: Colors.black87,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
+          // ۲. نوار وضعیت GPS یا راهنمای مسیر نشان در بالای صفحه
+          Positioned(
+            top: 12,
+            left: 14,
+            right: 14,
+            child: Card(
+              elevation: 6,
+              color: Colors.black87,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.navigation_rounded,
-                        color: Colors.lightGreenAccent,
-                        size: 28,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _currentStepInstruction,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
+                child: _isLoadingGps
+                    ? Row(
+                        children: const [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          ),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              'در حال دریافت موقعیت دقیق خودرو از ماهواره GPS...',
+                              style: TextStyle(
                                 color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                                fontSize: 12.5,
                               ),
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              'زمان تقریبی: $_remainingDuration | مسافت: $_remainingDistance',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 11.5,
+                          ),
+                        ],
+                      )
+                    : _isLoadingRoute
+                    ? Row(
+                        children: const [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Colors.lightGreenAccent,
+                              strokeWidth: 2,
+                            ),
+                          ),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              'موقعیت دریافت شد؛ در حال محاسبه بهترین مسیر ترافیکی نشان...',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
                               ),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          const Icon(
+                            Icons.navigation_rounded,
+                            color: Colors.lightGreenAccent,
+                            size: 28,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  _currentStepInstruction.isNotEmpty
+                                      ? _currentStepInstruction
+                                      : 'حرکت به سمت مبدأ پسماند',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _remainingDuration.isNotEmpty
+                                      ? 'مدت سفر: $_remainingDuration | مسافت: $_remainingDistance'
+                                      : 'مسیر با ترافیک آنلاین به‌روز شد',
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 11.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
               ),
             ),
+          ),
 
-          // ۳. پنل کنترل وضعیت مأموریت در پایین صفحه
+          // ۳. پنل پایین برای هدایت و اتمام سفارش
           Positioned(
             left: 16,
             right: 16,
@@ -355,8 +494,8 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                           ),
                           icon: const Icon(Icons.scale_rounded),
                           label: const Text('توزین و تسویه پسماندها'),
-                          onPressed: () {
-                            showModalBottomSheet(
+                          onPressed: () async {
+                            final total = await showModalBottomSheet<int>(
                               context: context,
                               isScrollControlled: true,
                               shape: const RoundedRectangleBorder(
@@ -368,6 +507,53 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                                 orderId: widget.orderId,
                               ),
                             );
+
+                            if (total != null && context.mounted) {
+                              showDialog(
+                                context: context,
+                                barrierDismissible: false,
+                                builder: (ctx) => AlertDialog(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                  ),
+                                  title: const Text(
+                                    'تسویه نهایی با موفقیت انجام شد',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                  content: Text(
+                                    'مبلغ $total تومان به کیف پول شهروند و دستمزد راننده واریز گردید.',
+                                  ),
+                                  actions: [
+                                    ElevatedButton(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(
+                                          0xFF2E7D32,
+                                        ),
+                                        foregroundColor: Colors.white,
+                                      ),
+                                      onPressed: () {
+                                        Navigator.of(ctx).pop();
+                                        Navigator.of(
+                                          context,
+                                        ).pushAndRemoveUntil(
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                const DriverOrdersScreen(),
+                                          ),
+                                          (route) => false,
+                                        );
+                                      },
+                                      child: const Text(
+                                        'بازگشت به لیست سفارش‌ها',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }
                           },
                         ),
                       ),

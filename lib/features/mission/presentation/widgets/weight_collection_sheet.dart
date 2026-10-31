@@ -3,7 +3,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/network/dio_client.dart';
-import '../../../orders/presentation/driver_orders_screen.dart';
 
 class WeightCollectionSheet extends ConsumerStatefulWidget {
   final int orderId;
@@ -30,13 +29,15 @@ class _WeightCollectionSheetState extends ConsumerState<WeightCollectionSheet> {
     try {
       final dio = ref.read(dioProvider);
       final res = await dio.get('categories/');
-      setState(() {
-        _categories = res.data;
-        for (var cat in _categories) {
-          _controllers[cat['id']] = TextEditingController();
-        }
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _categories = res.data;
+          for (var cat in _categories) {
+            _controllers[cat['id']] = TextEditingController();
+          }
+          _isLoading = false;
+        });
+      }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -51,7 +52,6 @@ class _WeightCollectionSheetState extends ConsumerState<WeightCollectionSheet> {
   }
 
   Future<void> _submitCompletion() async {
-    // اصلاح خط خطا: تعریف صریح نوع لیست برای ممانعت از خطای سینتکس
     final List itemsPayload = [];
 
     for (var cat in _categories) {
@@ -81,34 +81,11 @@ class _WeightCollectionSheetState extends ConsumerState<WeightCollectionSheet> {
         data: {'items': itemsPayload},
       );
 
-      final total = res.data['total_citizen_amount'] ?? 0;
+      final total = (res.data['total_citizen_amount'] as num?)?.toInt() ?? 0;
 
       if (mounted) {
-        Navigator.of(context).pop(); // بستن باتم‌شیت
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) => AlertDialog(
-            title: const Text('تسویه نهایی با موفقیت انجام شد'),
-            content: Text(
-              'مبلغ $total تومان به کیف پول شهروند و دستمزد راننده واریز گردید.',
-            ),
-            actions: [
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute(
-                      builder: (_) => const DriverOrdersScreen(),
-                    ),
-                    (route) => false,
-                  );
-                },
-                child: const Text('بازگشت به لیست سفارش‌ها'),
-              ),
-            ],
-          ),
-        );
+        // بستن باتم‌شیت و بازگرداندن مبلغ به کانتکست والد
+        Navigator.of(context).pop(total);
       }
     } catch (e) {
       if (mounted) {
