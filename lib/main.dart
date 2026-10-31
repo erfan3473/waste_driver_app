@@ -2,9 +2,9 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:waste_driver_app/features/splash/presentation/driver_splash_screen.dart';
 import 'core/services/auth_storage.dart';
 import 'features/auth/presentation/driver_login_screen.dart';
-import 'features/orders/presentation/driver_orders_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,7 +27,7 @@ class WasteDriverApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
         useMaterial3: true,
       ),
-      home: isLoggedIn ? const DriverOrdersScreen() : const DriverLoginScreen(),
+      home: isLoggedIn ? const DriverSplashScreen() : const DriverLoginScreen(),
     );
   }
 }

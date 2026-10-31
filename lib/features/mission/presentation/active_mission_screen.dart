@@ -46,7 +46,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
   String _remainingDistance = '';
   String _remainingDuration = '';
   String _currentStepInstruction = '';
-  bool _isLoadingGps = true;
+  bool _isLoadingGps = false;
   bool _isLoadingRoute = false;
 
   @override
@@ -62,6 +62,79 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
     _wsChannel = WebSocketChannel.connect(wsUri);
   }
 
+  /// مدیریت کلیک روی دکمه اختصاصی GPS و خطایابی خودکار
+  Future<void> _handleGpsButtonTap() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'مکان‌یاب (GPS) گوشی خاموش است. لطفاً آن را روشن فرمایید.',
+          ),
+          backgroundColor: Colors.orange,
+          action: SnackBarAction(
+            label: 'تنظیمات GPS',
+            textColor: Colors.white,
+            onPressed: () => Geolocator.openLocationSettings(),
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('دسترسی به موقعیت مکانی داده نشد.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'دسترسی لوکیشن مسدود است؛ از تنظیمات برنامه فعال کنید.',
+          ),
+          backgroundColor: Colors.red,
+          action: SnackBarAction(
+            label: 'مجوزها',
+            textColor: Colors.white,
+            onPressed: () => Geolocator.openAppSettings(),
+          ),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+      return;
+    }
+
+    // اگر قبلاً لوکیشن داشتیم، فقط دوربین نقشه را به موقعیت راننده می‌بریم و روت را تازه می‌کنیم
+    if (_driverCurrentLocation != null) {
+      _mapController.move(_driverCurrentLocation!, 16.5);
+      _requestRouteFromNeshan(_driverCurrentLocation!, _currentBearing);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('موقعیت راننده در مرکز نقشه قرار گرفت.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    // در غیر این صورت، دریافت مجدد موقعیت از ماهواره
+    await _initGpsAndStartRouting();
+  }
+
   /// دریافت قطعی موقعیت راننده و تنها پس از آن، شروع مسیریابی
   Future<void> _initGpsAndStartRouting() async {
     setState(() => _isLoadingGps = true);
@@ -74,10 +147,11 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text(
-                'موقعیت‌یاب (GPS) گوشی خاموش است. لطفاً آن را روشن کنید.',
+                'مکان‌یاب (GPS) گوشی خاموش است. لطفاً آن را روشن کنید.',
               ),
               action: SnackBarAction(
                 label: 'تنظیمات',
+                textColor: Colors.white,
                 onPressed: () => Geolocator.openLocationSettings(),
               ),
               backgroundColor: Colors.orange,
@@ -95,14 +169,35 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
           if (mounted) {
             setState(() => _isLoadingGps = false);
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('دسترسی به لوکیشن داده نشد.')),
+              const SnackBar(content: Text('دسترسی به موقعیت مکانی داده نشد.')),
             );
           }
           return;
         }
       }
 
-      // دریافت مختصات دقیق راننده از سخت‌افزار
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          setState(() => _isLoadingGps = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'دسترسی لوکیشن مسدود است؛ از تنظیمات برنامه دسترسی را فعال کنید.',
+              ),
+              backgroundColor: Colors.red,
+              action: SnackBarAction(
+                label: 'تنظیمات',
+                textColor: Colors.white,
+                onPressed: () => Geolocator.openAppSettings(),
+              ),
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
+        return;
+      }
+
+      // دریافت امن موقعیت بدون رها کردن اکسپشن کنترل‌نشده
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 15),
@@ -117,18 +212,16 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
           _isLoadingGps = false;
         });
 
-        // 👈 فقط و فقط حالا که مبدأ داریم، درخواست مسیر به نشان فرستاده می‌شود
         _requestRouteFromNeshan(driverLoc, pos.heading);
       }
 
-      // گوش دادن به جابه‌جایی‌های بعدی
       _startLiveTrackingStream();
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingGps = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('عدم موفقیت در اتصال به ماهواره GPS: $e'),
+            content: Text('خطا در دریافت مختصات GPS راننده: $e'),
             backgroundColor: Colors.red,
           ),
         );
@@ -156,7 +249,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
           _currentStepInstruction = result.nextInstruction;
         });
 
-        // نمایش همزمان راننده و مقصد روی صفحه
         try {
           final bounds = LatLngBounds(driverPos, widget.citizenLocation);
           _mapController.fitCamera(
@@ -192,7 +284,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
               });
             }
 
-            // ارسال زنده به وب‌سوکت برای گوشی شهروند
             if (_wsChannel != null) {
               final payload = {
                 'type': 'driver_location',
@@ -237,22 +328,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
       appBar: AppBar(
         title: Text('مأموریت سفارش #${widget.orderId}'),
         centerTitle: true,
-        actions: [
-          IconButton(
-            icon: (_isLoadingGps || _isLoadingRoute)
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.green,
-                    ),
-                  )
-                : const Icon(Icons.refresh_rounded),
-            tooltip: 'تلاش مجدد اتصال به GPS و مسیریابی',
-            onPressed: _initGpsAndStartRouting,
-          ),
-        ],
       ),
       body: Stack(
         children: [
@@ -269,7 +344,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                 userAgentPackageName: 'com.ariobonyantoos.waste_driver_app',
               ),
 
-              // رسم خط فقط در صورتی که مسیر از نشان دریافت شده باشد
               if (_routePoints.isNotEmpty)
                 PolylineLayer(
                   polylines: [
@@ -283,7 +357,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
 
               MarkerLayer(
                 markers: [
-                  // مارکر مقصد (شهروند)
                   Marker(
                     point: widget.citizenLocation,
                     width: 44,
@@ -295,7 +368,6 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                     ),
                   ),
 
-                  // مارکر خودرو (فقط بعد از دریافت لوکیشن راننده)
                   if (_driverCurrentLocation != null)
                     Marker(
                       point: _driverCurrentLocation!,
@@ -315,7 +387,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
             ],
           ),
 
-          // ۲. نوار وضعیت GPS یا راهنمای مسیر نشان در بالای صفحه
+          // ۲. نوار وضعیت راهنمای مسیر یا وضعیت اتصال ماهواره در بالای صفحه
           Positioned(
             top: 12,
             left: 14,
@@ -368,7 +440,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                           SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              'موقعیت دریافت شد؛ در حال محاسبه بهترین مسیر ترافیکی نشان...',
+                              'موقعیت دریافت شد؛ در حال محاسبه بهترین مسیر نشان...',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 12.5,
@@ -393,7 +465,9 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                                 Text(
                                   _currentStepInstruction.isNotEmpty
                                       ? _currentStepInstruction
-                                      : 'حرکت به سمت مبدأ پسماند',
+                                      : (_driverCurrentLocation == null
+                                            ? 'سیگنال GPS نامشخص (دکمه پایین را لمس کنید)'
+                                            : 'حرکت به سمت مبدأ پسماند'),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
@@ -406,7 +480,7 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
                                 Text(
                                   _remainingDuration.isNotEmpty
                                       ? 'مدت سفر: $_remainingDuration | مسافت: $_remainingDistance'
-                                      : 'مسیر با ترافیک آنلاین به‌روز شد',
+                                      : 'نقشه آماده راهبری است',
                                   style: const TextStyle(
                                     color: Colors.white70,
                                     fontSize: 11.5,
@@ -421,7 +495,35 @@ class _ActiveMissionScreenState extends ConsumerState<ActiveMissionScreen> {
             ),
           ),
 
-          // ۳. پنل پایین برای هدایت و اتمام سفارش
+          // ۳. 🎯 دکمه اختصاصی بررسی وضعیت و تمرکز روی GPS راننده روی نقشه
+          Positioned(
+            right: 16,
+            bottom: 175,
+            child: FloatingActionButton.small(
+              backgroundColor: Colors.white,
+              tooltip: 'موقعیت GPS راننده',
+              onPressed: _isLoadingGps ? null : _handleGpsButtonTap,
+              child: _isLoadingGps
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFF2E7D32),
+                      ),
+                    )
+                  : Icon(
+                      _driverCurrentLocation != null
+                          ? Icons.my_location
+                          : Icons.location_disabled,
+                      color: _driverCurrentLocation != null
+                          ? const Color(0xFF2E7D32)
+                          : Colors.red,
+                    ),
+            ),
+          ),
+
+          // ۴. پنل مأموریت و دکمه‌های وضعیت در پایین صفحه
           Positioned(
             left: 16,
             right: 16,

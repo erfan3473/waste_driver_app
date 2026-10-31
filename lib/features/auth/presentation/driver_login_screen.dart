@@ -117,7 +117,7 @@ class _DriverLoginScreenState extends ConsumerState<DriverLoginScreen> {
                 controller: _phoneController,
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
-                  labelText: 'شماره موبایل سازمانی',
+                  labelText: 'شماره موبایل ثبت شده در آریوبنیان توس',
                   prefixIcon: Icon(Icons.phone_android),
                   border: OutlineInputBorder(),
                 ),
